@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Вход ВК для пересылки</title>
+  <style>
+    body{font:16px/1.5 system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;color:#17212b}
+    h1{font-size:26px}label{display:block;margin:18px 0 6px;font-weight:600}
+    input,button,textarea{font:inherit;padding:10px;width:100%;box-sizing:border-box}
+    button{margin-top:16px;background:#07f;color:#fff;border:0;border-radius:8px;cursor:pointer}
+    button.secondary{background:#52606d}.note{background:#f1f4f7;padding:14px;border-radius:8px}
+    #status{white-space:pre-wrap;margin:16px 0}textarea{min-height:100px}
+    code{overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <h1>Получение ключа ВК для уведомлений</h1>
+  <p class="note">Страница не отправляет ключи на GitHub и никуда их не сохраняет. После входа ключ показывается только здесь. Скопируйте его прямо в секрет GitHub <code>VK_ACCESS_TOKEN</code>. Если ВК не выдаст разрешение на сообщения, эта связка не сможет читать беседы.</p>
+  <p>В форме ВК укажите:</p>
+  <ul>
+    <li>Базовый домен: <code id="domain"></code></li>
+    <li>Доверенный Redirect URL: <code id="redirect"></code></li>
+  </ul>
+  <label for="app">ID приложения ВК</label>
+  <input id="app" inputmode="numeric" autocomplete="off" placeholder="Вставьте ID приложения после его создания">
+  <label for="scope">Запрашиваемые права</label>
+  <input id="scope" value="messages">
+  <button id="login">Войти через ВК и получить ключ</button>
+  <div id="status" role="status"></div>
+  <section id="result" hidden>
+    <h2>Ключ ВК</h2>
+    <p>Скопируйте значение в закрытый секрет GitHub <code>VK_ACCESS_TOKEN</code>. Не отправляйте его в чат и не сохраняйте в файлах.</p>
+    <textarea id="token" readonly></textarea>
+    <button class="secondary" id="copy">Скопировать ключ</button>
+    <p id="expiry"></p>
+  </section>
+  <script src="https://unpkg.com/@vkid/sdk@2.6.1/dist-sdk/umd/index.js"></script>
+  <script>
+  (() => {
+    const redirectUrl = location.origin + location.pathname;
+    document.getElementById('domain').textContent = location.hostname;
+    document.getElementById('redirect').textContent = redirectUrl;
+    const status = document.getElementById('status');
+    const appInput = document.getElementById('app');
+    const scopeInput = document.getElementById('scope');
+    const params = new URLSearchParams(location.search);
+    const savedApp = sessionStorage.getItem('vk_app_id') || localStorage.getItem('vk_app_id');
+    if (savedApp) appInput.value = savedApp;
+
+    const init = (appId, state, verifier, scope) => {
+      if (!window.VKID) throw new Error('Не загрузилась библиотека VK ID. Обновите страницу.');
+      VKID.Config.init({
+        app: Number(appId),
+        redirectUrl,
+        state,
+        codeVerifier: verifier,
+        scope,
+        mode: VKID.ConfigAuthMode.Redirect
+      });
+    };
+
+    const code = params.get('code');
+    const deviceId = params.get('device_id');
+    if (code) {
+      const appId = sessionStorage.getItem('vk_app_id');
+      const scope = sessionStorage.getItem('vk_scope') || 'messages';
+      const expectedState = sessionStorage.getItem('vk_state');
+      const verifier = sessionStorage.getItem('vk_verifier');
+      const returnedState = params.get('state');
+      history.replaceState({}, document.title, redirectUrl);
+      (async () => {
+        try {
+          if (!appId || !expectedState || !verifier) throw new Error('Данные входа потерялись. Начните авторизацию заново.');
+          if (returnedState !== expectedState) throw new Error('Проверка состояния не прошла. Начните заново.');
+          init(appId, expectedState, verifier, scope);
+          const tokens = await VKID.Auth.exchangeCode(code, deviceId, verifier);
+          if (!tokens || !tokens.access_token) throw new Error('ВК не вернул пользовательский ключ.');
+          document.getElementById('token').value = tokens.access_token;
+          document.getElementById('result').hidden = false;
+          document.getElementById('expiry').textContent = tokens.expires_in ? 'Срок действия, секунд: ' + tokens.expires_in : '';
+          status.textContent = 'Авторизация успешна. Проверьте разрешения и скопируйте ключ в секрет GitHub.';
+          sessionStorage.removeItem('vk_verifier');
+          sessionStorage.removeItem('vk_state');
+        } catch (e) {
+          status.textContent = 'Ошибка авторизации: ' + (e && e.message ? e.message : String(e));
+        }
+      })();
+    } else if (params.get('error')) {
+      status.textContent = 'ВК отклонил авторизацию: ' + (params.get('error_description') || params.get('error'));
+      history.replaceState({}, document.title, redirectUrl);
+    }
+
+    document.getElementById('login').addEventListener('click', () => {
+      try {
+        const appId = appInput.value.trim();
+        const scope = scopeInput.value.trim();
+        if (!/^\d+$/.test(appId)) throw new Error('Введите цифровой ID приложения ВК.');
+        if (!scope) throw new Error('Укажите право доступа.');
+        const bytes = new Uint8Array(48);
+        crypto.getRandomValues(bytes);
+        const verifier = Array.from(bytes, b => b.toString(16).padStart(2,'0')).join('');
+        const state = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2,'0')).join('');
+        sessionStorage.setItem('vk_app_id', appId);
+        sessionStorage.setItem('vk_scope', scope);
+        sessionStorage.setItem('vk_verifier', verifier);
+        sessionStorage.setItem('vk_state', state);
+        localStorage.setItem('vk_app_id', appId);
+        init(appId, state, verifier, scope);
+        status.textContent = 'Переходим на страницу входа ВК…';
+        VKID.Auth.login().catch(e => { status.textContent = 'Не удалось начать вход: ' + (e && e.message ? e.message : String(e)); });
+      } catch (e) {
+        status.textContent = e && e.message ? e.message : String(e);
+      }
+    });
+    document.getElementById('copy').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(document.getElementById('token').value); status.textContent = 'Ключ скопирован. Добавьте его в GitHub Secret VK_ACCESS_TOKEN.'; }
+      catch (_) { status.textContent = 'Не удалось скопировать автоматически. Выделите поле ключа и скопируйте вручную.'; }
+    });
+  })();
+  </script>
+</body>
+</html>
